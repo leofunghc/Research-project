@@ -1,0 +1,755 @@
+install.packages("dplyr")
+install.packages("stats")
+install.packages("MASS") # For generating synthetic data
+install.packages("nlme") # For the optimization
+install.packages("tidyr")
+install.packages("ggplot2")
+install.packages("tseries")
+library(dplyr)
+library(stats)
+library(MASS)
+library(nlme)
+library(tseries)
+library(ggplot2)
+library(dplyr)
+library(stats)
+library(MASS)
+library(nlme)
+library(tidyr)
+library(gridExtra)
+
+setwd("/Users/leofunghc/Downloads")
+round_data <- readRDS("roundData2018-2022.rds")
+
+sg_data <- read.csv('sg_data.csv',header=TRUE, stringsAsFactors=FALSE)
+
+summarized_sg <- sg_data %>%
+  group_by(EP_game_id, player_id, round_number, shotlink_date) %>%
+  summarize(Total = sum(strokes_gained))
+
+freq_table <- table(summarized_sg$player_id)
+least_freq_value <- names(which.min(freq_table))
+least_freq_count <- min(freq_table)
+least_freq_value
+least_freq_count
+
+value_counts <- table(summarized_sg$player_id)
+# Filter rows where the value appears more than once
+summarized_sg <- summarized_sg[summarized_sg$player_id %in% names(value_counts[value_counts > 1]), ]
+
+player_id <- unique(summarized_sg$player_id)
+player_data <- data.frame(player_id = player_id, stringsAsFactors = FALSE)
+player_data$new_player_id <- 1:nrow(player_data)
+df = merge(x = summarized_sg, y = player_data, by = "player_id", all = TRUE)
+df_clean <- na.omit(df)
+df_clean$shotlink_date <- as.Date(df_clean$shotlink_date)
+
+# Kalman filter function
+kalman_filter <- function(df, theta_f, theta_c, sigma_f, sigma_c) {
+  log_likelihood_total <- 0
+  
+  for (i in 1: 1122) {
+    player_i_data <- df %>%
+      filter(new_player_id == i)
+    player_i_data <- player_i_data %>%
+      arrange(shotlink_date)
+    player_i_data$shotlink_date <- as.Date(player_i_data$shotlink_date)
+    
+    player_i_data$Time[1] <- 1
+    for (t in 2:length(player_i_data$Time)){
+      player_i_data$Time[t] <- (player_i_data$shotlink_date[t]- player_i_data$shotlink_date[t-1])/365.25
+    }
+    
+    sg_player_i <- player_i_data$Total
+    #unsure R
+    z_player_i <- sg_player_i
+    z_player_i <- as.vector(z_player_i)
+    
+    T <- length(z_player_i)
+    X_pred <- matrix(NA ,nrow = 2, ncol = T)
+    P_pred_11 <- numeric(T)
+    P_pred_22 <- numeric(T)
+    X_update <- matrix(NA ,nrow = 2, ncol = T)
+    P_update_11 <- numeric(T)
+    P_update_22 <- numeric(T)
+    #unsure, was Rt <- matrix(c(0.1, 0.1), ncol = 2)
+    Rt <- 0.1
+    Ht <- matrix(c(1,1), ncol = 2)
+    
+    # Initial estimates
+    X_update[1,1] <- 0
+    X_update[2,1] <- z_player_i[1]
+    #unsure
+    P_update_11[1] <- 10.0
+    P_update_22[1] <- 1.0
+    
+    log_likelihood <- 0.0
+    
+    for (t in 2:T) {
+      qx <- sigma_f^2*((1-exp(-2*theta_f*player_i_data$Time[t]))/(2*theta_f))
+      qy <- sigma_c^2*((1-exp(-2*theta_c*player_i_data$Time[t]))/(2*theta_c))
+      mean <- c(0, 0)  
+      Qt <- matrix(c(qx, 0, 0, qy), ncol = 2)
+      #wt <- mvrnorm(n = 1, mu = mean,  Sigma = Qt)
+      f <- matrix(c(exp(-theta_f*player_i_data$Time[t]), 0, 0, exp(-theta_c*player_i_data$Time[t])), ncol = 2)
+      
+      P_pred_pre <- matrix(c(P_update_11[t-1], 0, 0, P_update_22[t-1]), ncol = 2)
+      # Prediction
+      X_pred[,t] <- f %*% X_update[,t-1]
+      P_pred <- f %*% P_pred_pre %*% t(f) + Qt
+      
+      # Update
+      St <- Rt + Ht%*% P_pred %*% t(Ht)
+      K <- P_pred %*% t(Ht) %*% solve(St)
+      Yt <- z_player_i[t] - Ht %*% X_pred[,t]
+      X_update[,t] <- X_pred[,t] + K %*% Yt
+      P_update <- P_pred - K %*% St %*% t(K)
+      P_update_11[t] <- P_update[1,1]
+      P_update_22[t] <- P_update[2,2]
+      
+      # Log-likelihood
+      #is log natural log
+      log_likelihood <- log_likelihood - 0.5 * (t(Yt)%*% solve(St)%*% Yt + log(abs(St))+ 2*log(2*pi))
+    }
+    
+    log_likelihood_total <- log_likelihood_total+ log_likelihood
+  }
+  
+  return(-log_likelihood_total)  # Negative log-likelihood for minimization
+}
+
+# MLE using optim
+
+initial_guess <- c(690.8613799, 0.9426804, 147.1868282, 2.7112035)
+initial_guess <- c(836.349508, 5.879451, 107.309328, 3.550265)
+initial_guess <- c(836.692052, 5.846967, 107.332886, 3.542489)
+initial_guess <- c(836.692052, 5.846967, 107.332886, 3.542489)
+result <- optim(par = initial_guess, fn = function(params) kalman_filter(df_clean, params[1], params[2], params[3], params[4]))
+
+result$par
+theta_f_est <- 836.692052
+theta_c_est <- 5.846967
+sigma_f_est <- 107.332886
+sigma_c_est <- 3.542489
+
+
+#model previous SG Rory
+player_i_data <- df %>%
+  filter(player_id == 92598)
+player_i_data <- player_i_data %>%
+  arrange(shotlink_date)
+player_i_data$shotlink_date <- as.Date(player_i_data$shotlink_date)
+
+player_i_data$Time[1] <- 1
+for (t in 2:length(player_i_data$Time)){
+  player_i_data$Time[t] <- (player_i_data$shotlink_date[t]- player_i_data$shotlink_date[t-1])/365.25
+}
+
+sg_player_i <- player_i_data$Total
+z_player_i <- sg_player_i
+z_player_i <- as.vector(z_player_i)
+
+T <- length(z_player_i)
+X_pred <- matrix(NA ,nrow = 2, ncol = T)
+P_pred_11 <- numeric(T)
+P_pred_22 <- numeric(T)
+X_update <- matrix(NA ,nrow = 2, ncol = T)
+P_update_11 <- numeric(T)
+P_update_22 <- numeric(T)
+#unsure, was Rt <- matrix(c(0.1, 0.1), ncol = 2)
+Rt <- 0.1
+Ht <- matrix(c(1,1), ncol = 2)
+
+# Initial estimates
+X_update[1,1] <- 0
+X_update[2,1] <- z_player_i[1]
+#unsure
+P_update_11[1] <- 10.0
+P_update_22[1] <- 1.0
+
+for (t in 2:T) {
+  qx <- sigma_f_est^2*((1-exp(-2*theta_f_est*player_i_data$Time[t]))/(2*theta_f_est))
+  qy <- sigma_c_est^2*((1-exp(-2*theta_c_est*player_i_data$Time[t]))/(2*theta_c_est))
+  mean <- c(0, 0)  
+  Qt <- matrix(c(qx, 0, 0, qy), ncol = 2)
+  f <- matrix(c(exp(-theta_f_est*player_i_data$Time[t]), 0, 0, exp(-theta_c_est*player_i_data$Time[t])), ncol = 2)
+  
+  #P_pred <- matrix(c(P_update_11[n-1], 0, 0, P_update_22[n-1]), ncol = 2)
+  P_pred_pre <- matrix(c(P_update_11[t-1], 0, 0, P_update_22[t-1]), ncol = 2)
+  # Prediction
+  X_pred[,t] <- f %*% X_update[,t-1]
+  P_pred <- f %*% P_pred_pre %*% t(f) + Qt
+  
+  # Update
+  St <- Rt + Ht%*% P_pred %*% t(Ht)
+  K <- P_pred %*% t(Ht) %*% solve(St)
+  Yt <- z_player_i[t] - Ht %*% X_pred[,t]
+  X_update[,t] <- X_pred[,t] + K %*% Yt
+  P_update <- P_pred - K %*% St %*% t(K)
+  P_update_11[t] <- P_update[1,1]
+  P_update_22[t] <- P_update[2,2]
+}
+
+X_update[,271]
+
+par(mar = c(5, 4, 4, 8) + 0.1)
+
+plot(player_i_data$shotlink_date, X_update[1,], type = "p", col = "black", ylim = c(-6, 8), xlab = "Years", ylab = "Form and Class")
+lines(player_i_data$shotlink_date, X_update[2,], type = "l", col = "black",lwd = 2)
+
+legend("topright", 
+       legend = c("Form", "Class"),
+       col = c("black", "black"),
+       pch = c(16, NA),           # Point type for scatter, NA for line
+       lty = c(NA, 1),            # Line type for line, NA for scatter
+       lwd = c(NA, 2),            # Line width for the line, NA for scatter
+       xpd = TRUE,                # Allow drawing outside the plot area
+       inset = c(-0.3, 0)) 
+
+
+#model previous SG Scottie
+player_i_data <- df %>%
+  filter(player_id == 542132)
+player_i_data <- player_i_data %>%
+  arrange(shotlink_date)
+player_i_data$shotlink_date <- as.Date(player_i_data$shotlink_date)
+
+player_i_data$Time[1] <- 1
+for (t in 2:length(player_i_data$Time)){
+  player_i_data$Time[t] <- (player_i_data$shotlink_date[t]- player_i_data$shotlink_date[t-1])/365.25
+}
+
+sg_player_i <- player_i_data$Total
+z_player_i <- sg_player_i
+z_player_i <- as.vector(z_player_i)
+
+T <- length(z_player_i)
+X_pred <- matrix(NA ,nrow = 2, ncol = T)
+P_pred_11 <- numeric(T)
+P_pred_22 <- numeric(T)
+X_update <- matrix(NA ,nrow = 2, ncol = T)
+P_update_11 <- numeric(T)
+P_update_22 <- numeric(T)
+#unsure, was Rt <- matrix(c(0.1, 0.1), ncol = 2)
+Rt <- 0.1
+Ht <- matrix(c(1,1), ncol = 2)
+
+# Initial estimates
+X_update[1,1] <- 0
+X_update[2,1] <- z_player_i[1]
+#unsure
+P_update_11[1] <- 10.0
+P_update_22[1] <- 1.0
+
+for (t in 2:T) {
+  qx <- sigma_f_est^2*((1-exp(-2*theta_f_est*player_i_data$Time[t]))/(2*theta_f_est))
+  qy <- sigma_c_est^2*((1-exp(-2*theta_c_est*player_i_data$Time[t]))/(2*theta_c_est))
+  mean <- c(0, 0)  
+  Qt <- matrix(c(qx, 0, 0, qy), ncol = 2)
+  f <- matrix(c(exp(-theta_f_est*player_i_data$Time[t]), 0, 0, exp(-theta_c_est*player_i_data$Time[t])), ncol = 2)
+  
+  #P_pred <- matrix(c(P_update_11[n-1], 0, 0, P_update_22[n-1]), ncol = 2)
+  P_pred_pre <- matrix(c(P_update_11[t-1], 0, 0, P_update_22[t-1]), ncol = 2)
+  # Prediction
+  X_pred[,t] <- f %*% X_update[,t-1]
+  P_pred <- f %*% P_pred_pre %*% t(f) + Qt
+  
+  # Update
+  St <- Rt + Ht%*% P_pred %*% t(Ht)
+  K <- P_pred %*% t(Ht) %*% solve(St)
+  Yt <- z_player_i[t] - Ht %*% X_pred[,t]
+  X_update[,t] <- X_pred[,t] + K %*% Yt
+  P_update <- P_pred - K %*% St %*% t(K)
+  P_update_11[t] <- P_update[1,1]
+  P_update_22[t] <- P_update[2,2]
+}
+
+X_update[,248]
+
+plot(player_i_data$shotlink_date, X_update[1,], type = "p", col = "black", ylim = c(-8, 10), xlab = "Years", ylab = "Form and Class")
+lines(player_i_data$shotlink_date, X_update[2,], type = "l", col = "black", lwd = 2)
+
+legend("topright", 
+       legend = c("Form", "Class"),
+       col = c("black", "black"),
+       pch = c(16, NA),           # Point type for scatter, NA for line
+       lty = c(NA, 1),            # Line type for line, NA for scatter
+       lwd = c(NA, 2),            # Line width for the line, NA for scatter
+       xpd = TRUE,                # Allow drawing outside the plot area
+       inset = c(-0.3, 0)) 
+
+#tony Finau 
+player_i_data <- df %>%
+  filter(player_id == 92553)
+player_i_data <- player_i_data %>%
+  arrange(shotlink_date)
+player_i_data$shotlink_date <- as.Date(player_i_data$shotlink_date)
+
+player_i_data$Time[1] <- 1
+for (t in 2:length(player_i_data$Time)){
+  player_i_data$Time[t] <- (player_i_data$shotlink_date[t]- player_i_data$shotlink_date[t-1])/365.25
+}
+
+sg_player_i <- player_i_data$Total
+z_player_i <- sg_player_i
+z_player_i <- as.vector(z_player_i)
+
+T <- length(z_player_i)
+X_pred <- matrix(NA ,nrow = 2, ncol = T)
+P_pred_11 <- numeric(T)
+P_pred_22 <- numeric(T)
+X_update <- matrix(NA ,nrow = 2, ncol = T)
+P_update_11 <- numeric(T)
+P_update_22 <- numeric(T)
+#unsure, was Rt <- matrix(c(0.1, 0.1), ncol = 2)
+Rt <- 0.1
+Ht <- matrix(c(1,1), ncol = 2)
+
+# Initial estimates
+X_update[1,1] <- 0
+X_update[2,1] <- z_player_i[1]
+#unsure
+P_update_11[1] <- 10.0
+P_update_22[1] <- 1.0
+
+for (t in 2:T) {
+  qx <- sigma_f_est^2*((1-exp(-2*theta_f_est*player_i_data$Time[t]))/(2*theta_f_est))
+  qy <- sigma_c_est^2*((1-exp(-2*theta_c_est*player_i_data$Time[t]))/(2*theta_c_est))
+  mean <- c(0, 0)  
+  Qt <- matrix(c(qx, 0, 0, qy), ncol = 2)
+  f <- matrix(c(exp(-theta_f_est*player_i_data$Time[t]), 0, 0, exp(-theta_c_est*player_i_data$Time[t])), ncol = 2)
+  
+  #P_pred <- matrix(c(P_update_11[n-1], 0, 0, P_update_22[n-1]), ncol = 2)
+  P_pred_pre <- matrix(c(P_update_11[t-1], 0, 0, P_update_22[t-1]), ncol = 2)
+  # Prediction
+  X_pred[,t] <- f %*% X_update[,t-1]
+  P_pred <- f %*% P_pred_pre %*% t(f) + Qt
+  
+  # Update
+  St <- Rt + Ht%*% P_pred %*% t(Ht)
+  K <- P_pred %*% t(Ht) %*% solve(St)
+  Yt <- z_player_i[t] - Ht %*% X_pred[,t]
+  X_update[,t] <- X_pred[,t] + K %*% Yt
+  P_update <- P_pred - K %*% St %*% t(K)
+  P_update_11[t] <- P_update[1,1]
+  P_update_22[t] <- P_update[2,2]
+}
+
+X_update[,333]
+
+plot(player_i_data$shotlink_date, X_update[1,], type = "p", col = "black", ylim = c(-8, 8), xlab = "Years", ylab = "Form and Class")
+lines(player_i_data$shotlink_date, X_update[2,], type = "l", col = "black",lwd = 2)
+
+legend("topright", 
+       legend = c("Form", "Class"),
+       col = c("black", "black"),
+       pch = c(16, NA),           # Point type for scatter, NA for line
+       lty = c(NA, 1),            # Line type for line, NA for scatter
+       lwd = c(NA, 2),            # Line width for the line, NA for scatter
+       xpd = TRUE,                # Allow drawing outside the plot area
+       inset = c(-0.3, 0)) 
+
+
+#player ranking
+new_summarized_sg <- sg_data %>%
+  group_by(EP_game_id, player_id, player_name, round_number, shotlink_date) %>%
+  summarize(Total = sum(strokes_gained))
+ranking_2023 <- read.csv('stats.csv',header=TRUE, stringsAsFactors=FALSE)
+players <- ranking_2023$PLAYER[1:100]
+class_data <- new_summarized_sg[new_summarized_sg$player_name %in% players, ]
+class_data <- class_data[class_data$player_id %in% names(value_counts[value_counts > 150]), ]
+
+player_id_2 <- unique(class_data$player_id)
+player_data_2 <- data.frame(player_id = player_id_2, stringsAsFactors = FALSE)
+player_data_2$new_player_id <- 1:nrow(player_data_2)
+class_df = merge(x = class_data, y = player_data_2, by = "player_id", all = TRUE)
+
+new_player_id <- player_data_2$new_player_id
+player_class <- data.frame(new_player_id)
+player_class$class <- NA
+
+for (i in 1:nrow(player_class)){
+  player_i_data <- class_df %>%
+    filter(new_player_id == i)
+  player_i_data <- player_i_data %>%
+    arrange(shotlink_date)
+  player_i_data$shotlink_date <- as.Date(player_i_data$shotlink_date)
+  
+  player_i_data$Time[1] <- 1
+  for (t in 2:length(player_i_data$Time)){
+    player_i_data$Time[t] <- (player_i_data$shotlink_date[t]- player_i_data$shotlink_date[t-1])/365.25
+  }
+  
+  sg_player_i <- player_i_data$Total
+  #unsure R
+  z_player_i <- sg_player_i
+  z_player_i <- as.vector(z_player_i)
+  
+  T <- length(z_player_i)
+  X_pred <- matrix(NA ,nrow = 2, ncol = T)
+  P_pred_11 <- numeric(T)
+  P_pred_22 <- numeric(T)
+  X_update <- matrix(NA ,nrow = 2, ncol = T)
+  P_update_11 <- numeric(T)
+  P_update_22 <- numeric(T)
+  #unsure, was Rt <- matrix(c(0.1, 0.1), ncol = 2)
+  Rt <- 0.1
+  Ht <- matrix(c(1,1), ncol = 2)
+  
+  # Initial estimates
+  X_update[1,1] <- 0
+  X_update[2,1] <- z_player_i[1]
+  #unsure
+  P_update_11[1] <- 10.0
+  P_update_22[1] <- 1.0
+  
+  for (t in 2:T) {
+    qx <- sigma_f_est^2*((1-exp(-2*theta_f_est*player_i_data$Time[t]))/(2*theta_f_est))
+    qy <- sigma_c_est^2*((1-exp(-2*theta_c_est*player_i_data$Time[t]))/(2*theta_c_est))
+    mean <- c(0, 0)  
+    Qt <- matrix(c(qx, 0, 0, qy), ncol = 2)
+    f <- matrix(c(exp(-theta_f_est*player_i_data$Time[t]), 0, 0, exp(-theta_c_est*player_i_data$Time[t])), ncol = 2)
+    
+    #P_pred <- matrix(c(P_update_11[n-1], 0, 0, P_update_22[n-1]), ncol = 2)
+    P_pred_pre <- matrix(c(P_update_11[t-1], 0, 0, P_update_22[t-1]), ncol = 2)
+    # Prediction
+    X_pred[,t] <- f %*% X_update[,t-1]
+    P_pred <- f %*% P_pred_pre %*% t(f) + Qt
+    
+    # Update
+    St <- Rt + Ht%*% P_pred %*% t(Ht)
+    K <- P_pred %*% t(Ht) %*% solve(St)
+    Yt <- z_player_i[t] - Ht %*% X_pred[,t]
+    X_update[,t] <- X_pred[,t] + K %*% Yt
+    P_update <- P_pred - K %*% St %*% t(K)
+    P_update_11[t] <- P_update[1,1]
+    P_update_22[t] <- P_update[2,2]
+  }
+  player_class$class[i] <- X_update[2,T]
+}
+
+new_player_class = merge(x = player_class, y = player_data_2, by = "new_player_id", all = TRUE)
+sg_data_names <- sg_data[, c("player_name","player_id")]
+sg_data_names <- sg_data_names[!duplicated(sg_data_names), ]
+new_player_class = merge(x = new_player_class, y = sg_data_names, by = "player_id",all.x = TRUE)
+new_player_class <- new_player_class %>%
+  arrange(desc(class))
+new_player_class <- new_player_class[-c(2, 58), ]
+new_player_class$rank <- 1:64
+colnames(ranking_2023)[colnames(ranking_2023) == "PLAYER"] <- "player_name"
+new_player_class = merge(x = new_player_class, y = ranking_2023[, c("RANK","player_name")], by = "player_name", all.x = TRUE)
+new_player_class <- new_player_class %>%
+  arrange(desc(class))
+new_player_class <- new_player_class[, c(5, 1, 4, 6)] 
+colnames(new_player_class)[colnames(new_player_class) == "RANK"] <- "Official world ranking"
+
+
+#exploratory analysis
+summarized_sg <- sg_data %>%
+  group_by(EP_game_id, player_id, player_name, round_number, shotlink_date) %>%
+  summarize(Total = sum(strokes_gained))
+
+new_player_class = merge(x = player_class, y = player_data_2, by = "new_player_id", all = TRUE)
+tour_names <- round_data[, c("EP_game_id","tour_name")]
+tour_names <- tour_names[!duplicated(tour_names), ]
+summarized_sg_tour = merge(x = summarized_sg, y = tour_names, by = "EP_game_id",all.x = TRUE)
+unique_tour <- unique(summarized_sg_tour$tour_name)
+
+sg_data <- na.omit(sg_data)
+
+summarized_sg_wide <- sg_data %>%
+  pivot_wider(names_from = strokes_gained_category, values_from = strokes_gained)
+
+unique_names <- unique(sg_data$strokes_gained_category)
+print("Unique values in the 'Name' column:")
+print(unique_names)
+
+summarized_sg_wide <- sg_data %>%
+  spread(key = strokes_gained_category, value = strokes_gained)
+
+player_id <- unique(summarized_sg$player_id)
+player_data <- data.frame(player_id = player_id, stringsAsFactors = FALSE)
+player_data$new_player_id <- 1:nrow(player_data)
+df = merge(x = summarized_sg, y = player_data, by = "player_id", all = TRUE)
+df_clean <- na.omit(df)
+df_clean$shotlink_date <- as.Date(df_clean$shotlink_date)
+
+round_data$player_id <- as.integer(round_data$player_id)
+#round_data$date <- as.character(round_data$date)
+summarized_sg$shotlink_date <- as.Date(summarized_sg$shotlink_date)
+
+result <- inner_join(round_data, summarized_sg, by = c("player_name" = "player_name", "date" = "shotlink_date", "upcoming_round_number" = "round_number"))
+plot(result$score, result$Total)
+
+summarized_sg_wide$shotlink_date <- as.Date(summarized_sg_wide$shotlink_date)
+result_wide <- inner_join(round_data, summarized_sg_wide, by = c("player_name" = "player_name", "date" = "shotlink_date", "upcoming_round_number" = "round_number"))
+result_wide_selected <- result_wide[,c(1,2,5,9,19,21,22,38,39,40,41)]
+head(result_wide_selected)
+pdf("first_few_rows.pdf", width = 18, height = 4)
+
+# Print the first few rows of the dataset to the PDF
+grid.table(head(result_wide_selected, 6))  # Display first 6 rows
+
+# Close the PDF device
+dev.off()
+
+plot(result$score, result$Total, main = "Score vs Stroke Gained", xlab = "Score", ylab = "Stroke Gained", pch = 19, col = "black")
+abline(lm(result$Total ~ result$score), col = "black", lwd = 2)
+
+summary(summarized_sg_wide[, c(6:9)])
+
+#runs test
+player_avg_sg <- df_clean %>%
+  group_by(player_id) %>%
+  summarize(Avg = mean(Total))
+
+runtest_df = merge(x = df_clean, y = player_avg_sg, by = "player_id", all = TRUE)
+filtered_runtest_df <- runtest_df[runtest_df$shotlink_date > as.Date("2020-07-23"), ]
+value_counts <- table(filtered_runtest_df$player_id)
+filtered_runtest_df <- filtered_runtest_df[filtered_runtest_df$player_id %in% names(value_counts[value_counts > 10]), ]
+filtered_runtest_df$rt <- NA
+filtered_runtest_df$rt <- ifelse(filtered_runtest_df$Total>filtered_runtest_df$Avg,1,0)
+filtered_runtest_df <- filtered_runtest_df %>%
+  arrange(shotlink_date)
+
+
+new_player_id <- c(1:908)
+longest_run <- data.frame(new_player_id)
+longest_run$length <- NA
+
+for (i in 1:908){
+  player_i_rt <- filtered_runtest_df %>%
+    filter(new_player_id == i)
+  rle_result <- rle(player_i_rt$rt)
+  longest_run_length <- max(rle_result$lengths)
+  longest_run$length[i] <- longest_run_length
+}
+colnames(longest_run)[colnames(longest_run) == "new_player_id"] <- "player_id"
+longest_run <- longest_run %>%
+  arrange(desc(length))
+
+player_id <- unique(filtered_runtest_df$player_id)
+player_data <- data.frame(player_id = player_id, stringsAsFactors = FALSE)
+player_data$new_player_id <- 1:nrow(player_data)
+filtered_runtest_df = merge(x = filtered_runtest_df, y = player_data, by = "player_id", all = TRUE)
+filtered_runtest_df <- filtered_runtest_df %>%
+  arrange(shotlink_date)
+runtest_p <- data.frame(player_data$new_player_id)
+runtest_p$pvalue <- NA
+for (i in 1:364){
+  player_i_rt <- filtered_runtest_df %>%
+    filter(new_player_id.y == i)
+  runstest_result <- runs.test(as.factor(player_i_rt$rt))
+  runtest_p$pvalue[i] <- runstest_result$p.value
+}
+
+#p-value is less than 0.05, you reject the null hypothesis (sequence is random)
+proportion <- mean(runtest_p$pvalue < 0.05)
+proportion
+
+
+#regression
+summarized_sg_wide <- sg_data %>%
+  pivot_wider(names_from = strokes_gained_category, values_from = strokes_gained)
+
+unique_names <- unique(sg_data$strokes_gained_category)
+print("Unique values in the 'Name' column:")
+print(unique_names)
+
+summarized_sg_wide <- sg_data %>%
+  spread(key = strokes_gained_category, value = strokes_gained)
+
+summarized_sg_wide$shotlink_date <- as.Date(summarized_sg_wide$shotlink_date)
+
+result <- inner_join(round_data, summarized_sg_wide, by = c("player_name" = "player_name", "date" = "shotlink_date", "upcoming_round_number" = "round_number"))
+colnames(result)[colnames(result) == "Approach the Green"] <- "approach_the_green"
+colnames(result)[colnames(result) == "Around the Green"] <- "around_the_green"
+colnames(result)[colnames(result) == "Off the Tee"] <- "off_the_tee"
+colnames(result)[colnames(result) == "Putting"] <- "putting"
+result <- result %>%
+  filter(!is.na(approach_the_green) & !is.na(around_the_green) & !is.na(off_the_tee)
+         & !is.na(putting))
+
+result$avg_app_the_green <- NA
+result$avg_ard_the_green <- NA
+result$avg_off_the_tee <- NA
+result$avg_putting <- NA
+for (i in 40000:65221){
+  filtered_df <- result %>%
+    filter(player_id.x == result[i,]$player_id.x & date >= result[i,]$date-365 & date <= result[i,]$date)
+  
+  result$avg_app_the_green[i] <- mean(filtered_df$approach_the_green)
+  result$avg_ard_the_green[i] <- mean(filtered_df$around_the_green)
+  result$avg_off_the_tee[i] <- mean(filtered_df$off_the_tee)
+  result$avg_putting[i] <- mean(filtered_df$putting)
+}
+write.csv(result, "result.csv", row.names = FALSE)
+result <- read.csv('result.csv',header=TRUE, stringsAsFactors=FALSE)
+result$course_id <- as.factor(result$course_id)
+colnames(result)[colnames(result) == "player_id.x"] <- "player_id"
+
+value_counts <- table(result$player_id)
+# Filter rows where the value appears more than once
+result <- result[result$player_id %in% names(value_counts[value_counts > 1]), ]
+
+player_id <- unique(result$player_id)
+player_data <- data.frame(player_id = player_id, stringsAsFactors = FALSE)
+player_data$new_player_id <- 1:nrow(player_data)
+result = merge(x = result, y = player_data, by =  "player_id", all = TRUE)
+result$total <- result$approach_the_green + result$around_the_green + result$off_the_tee + result$putting
+
+
+#adding form covariate
+result$form <- NA
+result$pred_form <- NA
+result$class <- NA
+result$inform <- NA
+result <- subset(result, select = -c(cut_rounds, cut_size, made_cut, is_major))
+result_new <- data.frame()
+
+
+for (i in 1:821){
+  player_i_data <- result %>%
+    filter(new_player_id == i)
+  player_i_data <- player_i_data %>%
+    arrange(date)
+  player_i_data$date <- as.Date(player_i_data$date)
+  
+  player_i_data$Time[1] <- 1
+  for (t in 2:length(player_i_data$Time)){
+    player_i_data$Time[t] <- (player_i_data$date[t]- player_i_data$date[t-1])/365.25
+  }
+  
+  sg_player_i <- player_i_data$total
+  z_player_i <- sg_player_i
+  z_player_i <- as.vector(z_player_i)
+  
+  T <- length(z_player_i)
+  X_pred <- matrix(NA ,nrow = 2, ncol = T)
+  P_pred_11 <- numeric(T)
+  P_pred_22 <- numeric(T)
+  X_update <- matrix(NA ,nrow = 2, ncol = T)
+  P_update_11 <- numeric(T)
+  P_update_22 <- numeric(T)
+  #unsure, was Rt <- matrix(c(0.1, 0.1), ncol = 2)
+  Rt <- 0.1
+  Ht <- matrix(c(1,1), ncol = 2)
+  
+  # Initial estimates
+  X_update[1,1] <- 0
+  X_update[2,1] <- z_player_i[1]
+  #unsure
+  P_update_11[1] <- 10.0
+  P_update_22[1] <- 1.0
+  
+  for (t in 2:T) {
+    qx <- sigma_f_est^2*((1-exp(-2*theta_f_est*player_i_data$Time[t]))/(2*theta_f_est))
+    qy <- sigma_c_est^2*((1-exp(-2*theta_c_est*player_i_data$Time[t]))/(2*theta_c_est))
+    mean <- c(0, 0)  
+    Qt <- matrix(c(qx, 0, 0, qy), ncol = 2)
+    f <- matrix(c(exp(-theta_f_est*player_i_data$Time[t]), 0, 0, exp(-theta_c_est*player_i_data$Time[t])), ncol = 2)
+    
+    #P_pred <- matrix(c(P_update_11[n-1], 0, 0, P_update_22[n-1]), ncol = 2)
+    P_pred_pre <- matrix(c(P_update_11[t-1], 0, 0, P_update_22[t-1]), ncol = 2)
+    # Prediction
+    X_pred[,t] <- f %*% X_update[,t-1]
+    P_pred <- f %*% P_pred_pre %*% t(f) + Qt
+    
+    # Update
+    St <- Rt + Ht%*% P_pred %*% t(Ht)
+    K <- P_pred %*% t(Ht) %*% solve(St)
+    Yt <- z_player_i[t] - Ht %*% X_pred[,t]
+    X_update[,t] <- X_pred[,t] + K %*% Yt
+    P_update <- P_pred - K %*% St %*% t(K)
+    P_update_11[t] <- P_update[1,1]
+    P_update_22[t] <- P_update[2,2]
+  }
+  
+  player_i_data$form <-X_update[1,]
+  player_i_data$class <-X_update[2,]
+  
+  for (t in 2:nrow(player_i_data)){
+    player_i_data$pred_form[t] <- player_i_data$class[t-1] + exp(-theta_f_est*player_i_data$Time[t])*(player_i_data$form[t-1]-player_i_data$class[t-1])
+  }
+  
+  for (t in 2:nrow(player_i_data)){
+    player_i_data$inform[t] <- ifelse(player_i_data$form[t-1]>player_i_data$class[t-1],1,0)
+  }
+  
+  result_new <- rbind(result_new, player_i_data)
+}
+
+plot(result_new$form, result_new$pred_form, main = "Score vs Stroke Gained", xlab = "Score", ylab = "Stroke Gained", pch = 19, col = "black")
+
+result_new$form_pctg <- result_new$pred_form/result_new$class
+result_new$form_abs <- result_new$pred_form-result_new$class
+result_new$form_pctg[is.na(result_new$form_pctg)] <- 0
+result_new$inform[is.na(result_new$inform)] <- 0
+
+
+split_date <- as.Date("2022-01-01")
+training_set <- result_new[result_new$date <= split_date, ]
+testing_set <- result_new[result_new$date > split_date, ]
+#testing_set <- na.omit(testing_set)
+
+new_testing_set <- testing_set[, c("score","avg_app_the_green", "avg_ard_the_green", "avg_off_the_tee",
+                                   "avg_putting", "course_id", "times_played_course", "form_pctg", "pred_form",
+                                   "inform", "form", "form_abs")]
+colnames(new_testing_set)[colnames(new_testing_set) == "avg_app_the_green"] <- "approach_the_green"
+colnames(new_testing_set)[colnames(new_testing_set) == "avg_ard_the_green"] <- "around_the_green"
+colnames(new_testing_set)[colnames(new_testing_set) == "avg_off_the_tee"] <- "off_the_tee"
+colnames(new_testing_set)[colnames(new_testing_set) == "avg_putting"] <- "putting"
+
+
+model0 <- lm(score ~ approach_the_green + around_the_green + 
+               off_the_tee + putting, data = training_set)
+summary(model0)
+predictions <- predict(model0, new_testing_set)
+RMSE(testing_set$score, predictions)
+compare <- cbind(testing_set$score, predictions)
+
+model1 <- lm(score ~ approach_the_green + around_the_green + off_the_tee + 
+               putting + form_pctg, data = training_set)
+
+#na_in_column <- which(is.na(new_testing_set$form_pctg))
+#print(na_in_column)
+summary(model1)
+predictions <- predict(model1, new_testing_set)
+RMSE(testing_set$score, predictions)
+compare <- cbind(testing_set$score, predictions)
+
+
+na_in_column <- which(is.na(new_testing_set$pred_form))
+print(na_in_column)
+
+model2 <- lm(score ~ approach_the_green + around_the_green + off_the_tee + 
+               putting + pred_form, data = training_set)
+summary(model2)
+predictions <- predict(model2, new_testing_set)
+RMSE(testing_set$score[-na_in_column], predictions[-na_in_column])
+compare <- cbind(testing_set$score, predictions)
+
+
+model3 <- lm(score ~ approach_the_green + around_the_green + off_the_tee + 
+               putting + form, data = training_set)
+summary(model3)
+predictions <- predict(model3, new_testing_set)
+RMSE(testing_set$score[-na_in_column], predictions[-na_in_column])
+compare <- cbind(testing_set$score, predictions)
+
+
+#good model
+model4 <- lm(score ~ approach_the_green + around_the_green + off_the_tee + 
+               putting + inform, data = training_set)
+summary(model4)
+predictions <- predict(model4, new_testing_set)
+RMSE(testing_set$score, predictions)
+compare <- cbind(testing_set$score, predictions)
+
+
+model5 <- lm(score ~ approach_the_green + around_the_green + off_the_tee + 
+               putting + form_abs, data = training_set)
+summary(model5)
+predictions <- predict(model5, new_testing_set)
+RMSE(testing_set$score[-na_in_column], predictions[-na_in_column])
+compare <- cbind(testing_set$score, predictions)
